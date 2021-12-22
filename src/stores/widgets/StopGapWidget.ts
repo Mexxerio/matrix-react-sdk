@@ -32,8 +32,11 @@ import {
     IWidgetApiErrorResponseData,
     WidgetKind,
 } from "matrix-widget-api";
-import { StopGapWidgetDriver } from "./StopGapWidgetDriver";
 import { EventEmitter } from "events";
+import { MatrixEvent } from "matrix-js-sdk/src/models/event";
+import { logger } from "matrix-js-sdk/src/logger";
+
+import { StopGapWidgetDriver } from "./StopGapWidgetDriver";
 import { WidgetMessagingStore } from "./WidgetMessagingStore";
 import RoomViewStore from "../RoomViewStore";
 import { MatrixClientPeg } from "../../MatrixClientPeg";
@@ -45,13 +48,13 @@ import { WidgetType } from "../../widgets/WidgetType";
 import ActiveWidgetStore from "../ActiveWidgetStore";
 import { objectShallowClone } from "../../utils/objects";
 import defaultDispatcher from "../../dispatcher/dispatcher";
+import { Action } from "../../dispatcher/actions";
 import { ElementWidgetActions, IViewRoomApiRequest } from "./ElementWidgetActions";
 import { ModalWidgetStore } from "../ModalWidgetStore";
 import ThemeWatcher from "../../settings/watchers/ThemeWatcher";
 import { getCustomTheme } from "../../theme";
 import CountlyAnalytics from "../../CountlyAnalytics";
 import { ElementWidgetCapabilities } from "./ElementWidgetCapabilities";
-import { MatrixEvent } from "matrix-js-sdk/src/models/event";
 import { ELEMENT_CLIENT_ID } from "../../identifiers";
 import { getUserLanguage } from "../../languageHandler";
 import { WidgetVariableCustomisations } from "../../customisations/WidgetVariables";
@@ -67,7 +70,7 @@ interface IAppTileProps {
     userId: string;
     creatorUserId: string;
     waitForIframeLoad: boolean;
-    whitelistCapabilities: string[];
+    whitelistCapabilities?: string[];
     userWidget: boolean;
 }
 
@@ -133,7 +136,7 @@ export class ElementWidget extends Widget {
         };
     }
 
-    public getCompleteUrl(params: ITemplateParams, asPopout=false): string {
+    public getCompleteUrl(params: ITemplateParams, asPopout = false): string {
         return runTemplate(asPopout ? this.popoutTemplateUrl : this.templateUrl, {
             ...this.rawDefinition,
             data: this.rawData,
@@ -147,7 +150,7 @@ export class StopGapWidget extends EventEmitter {
     private scalarToken: string;
     private roomId?: string;
     private kind: WidgetKind;
-    private readUpToMap: {[roomId: string]: string} = {}; // room ID to event ID
+    private readUpToMap: { [roomId: string]: string } = {}; // room ID to event ID
 
     constructor(private appTileProps: IAppTileProps) {
         super();
@@ -260,11 +263,12 @@ export class StopGapWidget extends EventEmitter {
         this.messaging = new ClientWidgetApi(this.mockWidget, iframe, driver);
         this.messaging.on("preparing", () => this.emit("preparing"));
         this.messaging.on("ready", () => this.emit("ready"));
+        this.messaging.on("capabilitiesNotified", () => this.emit("capabilitiesNotified"));
         this.messaging.on(`action:${WidgetApiFromWidgetAction.OpenModalWidget}`, this.onOpenModal);
         WidgetMessagingStore.instance.storeMessaging(this.mockWidget, this.messaging);
 
         if (!this.appTileProps.userWidget && this.appTileProps.room) {
-            ActiveWidgetStore.setRoomId(this.mockWidget.id, this.appTileProps.room.roomId);
+            ActiveWidgetStore.instance.setRoomId(this.mockWidget.id, this.appTileProps.room.roomId);
         }
 
         // Always attach a handler for ViewRoom, but permission check it internally
@@ -288,7 +292,7 @@ export class StopGapWidget extends EventEmitter {
 
             // at this point we can change rooms, so do that
             defaultDispatcher.dispatch({
-                action: 'view_room',
+                action: Action.ViewRoom,
                 room_id: targetRoomId,
             });
 
@@ -317,7 +321,7 @@ export class StopGapWidget extends EventEmitter {
                     if (WidgetType.JITSI.matches(this.mockWidget.type)) {
                         CountlyAnalytics.instance.trackJoinCall(this.appTileProps.room.roomId, true, true);
                     }
-                    ActiveWidgetStore.setWidgetPersistence(this.mockWidget.id, ev.detail.data.value);
+                    ActiveWidgetStore.instance.setWidgetPersistence(this.mockWidget.id, ev.detail.data.value);
                     ev.preventDefault();
                     this.messaging.transport.reply(ev.detail, <IWidgetApiRequestEmptyData>{}); // ack
                 }
@@ -399,18 +403,18 @@ export class StopGapWidget extends EventEmitter {
             }
         } catch (e) {
             // All errors are non-fatal
-            console.error("Error preparing widget communications: ", e);
+            logger.error("Error preparing widget communications: ", e);
         }
     }
 
     public stop(opts = { forceDestroy: false }) {
-        if (!opts?.forceDestroy && ActiveWidgetStore.getPersistentWidgetId() === this.mockWidget.id) {
-            console.log("Skipping destroy - persistent widget");
+        if (!opts?.forceDestroy && ActiveWidgetStore.instance.getPersistentWidgetId() === this.mockWidget.id) {
+            logger.log("Skipping destroy - persistent widget");
             return;
         }
         if (!this.started) return;
         WidgetMessagingStore.instance.stopMessaging(this.mockWidget);
-        ActiveWidgetStore.delRoomId(this.mockWidget.id);
+        ActiveWidgetStore.instance.delRoomId(this.mockWidget.id);
 
         if (MatrixClientPeg.get()) {
             MatrixClientPeg.get().off('event', this.onEvent);
@@ -471,7 +475,7 @@ export class StopGapWidget extends EventEmitter {
 
         const raw = ev.getEffectiveEvent();
         this.messaging.feedEvent(raw, this.eventListenerRoomId).catch(e => {
-            console.error("Error sending event to widget: ", e);
+            logger.error("Error sending event to widget: ", e);
         });
     }
 }

@@ -15,11 +15,16 @@ limitations under the License.
 */
 import React, { createRef } from 'react';
 import classNames from 'classnames';
-import { _t } from '../../../languageHandler';
-import { MatrixClientPeg } from '../../../MatrixClientPeg';
-import { MatrixEvent } from "matrix-js-sdk/src/models/event";
+import { MatrixEvent, IEventRelation } from "matrix-js-sdk/src/models/event";
 import { Room } from "matrix-js-sdk/src/models/room";
 import { RoomMember } from "matrix-js-sdk/src/models/room-member";
+import { RelationType } from 'matrix-js-sdk/src/@types/event';
+import { logger } from "matrix-js-sdk/src/logger";
+import { POLL_START_EVENT_TYPE } from "matrix-js-sdk/src/@types/polls";
+import { makeLocationContent } from "matrix-js-sdk/src/content-helpers";
+
+import { _t } from '../../../languageHandler';
+import { MatrixClientPeg } from '../../../MatrixClientPeg';
 import dis from '../../../dispatcher/dispatcher';
 import { ActionPayload } from "../../../dispatcher/payloads";
 import Stickerpicker from './Stickerpicker';
@@ -27,15 +32,14 @@ import { makeRoomPermalink, RoomPermalinkCreator } from '../../../utils/permalin
 import ContentMessages from '../../../ContentMessages';
 import E2EIcon from './E2EIcon';
 import SettingsStore from "../../../settings/SettingsStore";
-import {
+import ContextMenu, {
     aboveLeftOf,
-    ContextMenu,
     useContextMenu,
     MenuItem,
+    AboveLeftOf,
 } from "../../structures/ContextMenu";
 import AccessibleTooltipButton from "../elements/AccessibleTooltipButton";
 import ReplyPreview from "./ReplyPreview";
-import { UIFeature } from "../../../settings/UIFeature";
 import { UPDATE_EVENT } from "../../../stores/AsyncStore";
 import { replaceableComponent } from "../../../utils/replaceableComponent";
 import VoiceRecordComposerTile from "./VoiceRecordComposerTile";
@@ -44,28 +48,25 @@ import { RecordingState } from "../../../audio/VoiceRecording";
 import Tooltip, { Alignment } from "../elements/Tooltip";
 import ResizeNotifier from "../../../utils/ResizeNotifier";
 import { E2EStatus } from '../../../utils/ShieldUtils';
-import SendMessageComposer from "./SendMessageComposer";
+import SendMessageComposer, { SendMessageComposer as SendMessageComposerClass } from "./SendMessageComposer";
 import { ComposerInsertPayload } from "../../../dispatcher/payloads/ComposerInsertPayload";
 import { Action } from "../../../dispatcher/actions";
 import EditorModel from "../../../editor/model";
 import EmojiPicker from '../emojipicker/EmojiPicker';
-import MemberStatusMessageAvatar from "../avatars/MemberStatusMessageAvatar";
 import UIStore, { UI_EVENTS } from '../../../stores/UIStore';
+import Modal from "../../../Modal";
+import RoomContext from '../../../contexts/RoomContext';
+import ErrorDialog from "../dialogs/ErrorDialog";
+import PollCreateDialog from "../elements/PollCreateDialog";
+import LocationShareType from "../location/LocationShareType";
+import { SettingUpdatedPayload } from "../../../dispatcher/payloads/SettingUpdatedPayload";
+import { CollapsibleButton, ICollapsibleButtonProps } from './CollapsibleButton';
+import { LocationButton, textForLocation } from '../location/LocationButton';
 import GifButton from "./GifButton";
 import { Gif } from "../gifpicker/Gif";
 
 let instanceCount = 0;
 const NARROW_MODE_BREAKPOINT = 500;
-
-interface IComposerAvatarProps {
-    me: object;
-}
-
-function ComposerAvatar(props: IComposerAvatarProps) {
-    return <div className="mx_MessageComposer_avatar">
-        <MemberStatusMessageAvatar member={props.me} width={24} height={24} />
-    </div>;
-}
 
 interface ISendButtonProps {
     onClick: () => void;
@@ -82,10 +83,9 @@ function SendButton(props: ISendButtonProps) {
     );
 }
 
-interface IEmojiButtonProps {
+interface IEmojiButtonProps extends Pick<ICollapsibleButtonProps, "narrowMode"> {
     addEmoji: (unicode: string) => boolean;
-    menuPosition: any; // TODO: Types
-    narrowMode: boolean;
+    menuPosition: AboveLeftOf;
 }
 
 const EmojiButton: React.FC<IEmojiButtonProps> = ({ addEmoji, menuPosition, narrowMode }) => {
@@ -110,11 +110,11 @@ const EmojiButton: React.FC<IEmojiButtonProps> = ({ addEmoji, menuPosition, narr
     // TODO: replace ContextMenuTooltipButton with a unified representation of
     // the header buttons and the right panel buttons
     return <React.Fragment>
-        <AccessibleTooltipButton
+        <CollapsibleButton
             className={className}
             onClick={openMenu}
-            title={!narrowMode && _t('Emoji picker')}
-            label={narrowMode && _t("Add emoji")}
+            narrowMode={narrowMode}
+            title={_t("Add emoji")}
         />
 
         { contextMenu }
@@ -123,6 +123,7 @@ const EmojiButton: React.FC<IEmojiButtonProps> = ({ addEmoji, menuPosition, narr
 
 interface IUploadButtonProps {
     roomId: string;
+    relation?: IEventRelation | null;
 }
 
 class UploadButton extends React.Component<IUploadButtonProps> {
@@ -164,7 +165,7 @@ class UploadButton extends React.Component<IUploadButtonProps> {
         }
 
         ContentMessages.sharedInstance().sendContentListToRoom(
-            tfiles, this.props.roomId, MatrixClientPeg.get(), true,
+            tfiles, this.props.roomId, this.props.relation, MatrixClientPeg.get(), true,
         );
 
         // This is the onChange handler for a file form control, but we're
@@ -194,13 +195,54 @@ class UploadButton extends React.Component<IUploadButtonProps> {
     }
 }
 
+interface IPollButtonProps extends Pick<ICollapsibleButtonProps, "narrowMode"> {
+    room: Room;
+}
+
+class PollButton extends React.PureComponent<IPollButtonProps> {
+    private onCreateClick = () => {
+        const canSend = this.props.room.currentState.maySendEvent(
+            POLL_START_EVENT_TYPE.name,
+            MatrixClientPeg.get().getUserId(),
+        );
+        if (!canSend) {
+            Modal.createTrackedDialog('Polls', 'permissions error: cannot start', ErrorDialog, {
+                title: _t("Permission Required"),
+                description: _t("You do not have permission to start polls in this room."),
+            });
+        } else {
+            Modal.createTrackedDialog(
+                'Polls',
+                'create',
+                PollCreateDialog,
+                {
+                    room: this.props.room,
+                },
+                'mx_CompoundDialog',
+                false, // isPriorityModal
+                true,  // isStaticModal
+            );
+        }
+    };
+
+    render() {
+        return (
+            <CollapsibleButton
+                className="mx_MessageComposer_button mx_MessageComposer_poll"
+                onClick={this.onCreateClick}
+                narrowMode={this.props.narrowMode}
+                title={_t("Create poll")}
+            />
+        );
+    }
+}
+
 interface IProps {
     room: Room;
     resizeNotifier: ResizeNotifier;
     permalinkCreator: RoomPermalinkCreator;
     replyToEvent?: MatrixEvent;
-    replyInThread?: boolean;
-    showReplyPreview?: boolean;
+    relation?: IEventRelation;
     e2eStatus?: E2EStatus;
     compact?: boolean;
 }
@@ -215,19 +257,22 @@ interface IState {
     narrowMode?: boolean;
     isMenuOpen: boolean;
     showStickers: boolean;
+    showStickersButton: boolean;
+    showPollsButton: boolean;
 }
 
 @replaceableComponent("views.rooms.MessageComposer")
 export default class MessageComposer extends React.Component<IProps, IState> {
     private dispatcherRef: string;
-    private messageComposerInput: SendMessageComposer;
-    private voiceRecordingButton: VoiceRecordComposerTile;
+    private messageComposerInput = createRef<SendMessageComposerClass>();
+    private voiceRecordingButton = createRef<VoiceRecordComposerTile>();
     private ref: React.RefObject<HTMLDivElement> = createRef();
     private instanceId: number;
 
+    static contextType = RoomContext;
+    public context!: React.ContextType<typeof RoomContext>;
+
     static defaultProps = {
-        replyInThread: false,
-        showReplyPreview: true,
         compact: false,
     };
 
@@ -243,9 +288,14 @@ export default class MessageComposer extends React.Component<IProps, IState> {
             recordingTimeLeftSeconds: null, // when set to a number, shows a toast
             isMenuOpen: false,
             showStickers: false,
+            showStickersButton: SettingsStore.getValue("MessageComposerInput.showStickersButton"),
+            showPollsButton: SettingsStore.getValue("feature_polls"),
         };
 
         this.instanceId = instanceCount++;
+
+        SettingsStore.monitorSetting("MessageComposerInput.showStickersButton", null);
+        SettingsStore.monitorSetting("feature_polls", null);
     }
 
     componentDidMount() {
@@ -268,14 +318,39 @@ export default class MessageComposer extends React.Component<IProps, IState> {
     };
 
     private onAction = (payload: ActionPayload) => {
-        if (payload.action === 'reply_to_event') {
-            // add a timeout for the reply preview to be rendered, so
-            // that the ScrollPanel listening to the resizeNotifier can
-            // correctly measure it's new height and scroll down to keep
-            // at the bottom if it already is
-            setTimeout(() => {
-                this.props.resizeNotifier.notifyTimelineHeightChanged();
-            }, 100);
+        switch (payload.action) {
+            case "reply_to_event":
+                if (payload.context === this.context.timelineRenderingType) {
+                    // add a timeout for the reply preview to be rendered, so
+                    // that the ScrollPanel listening to the resizeNotifier can
+                    // correctly measure it's new height and scroll down to keep
+                    // at the bottom if it already is
+                    setTimeout(() => {
+                        this.props.resizeNotifier.notifyTimelineHeightChanged();
+                    }, 100);
+                }
+                break;
+
+            case Action.SettingUpdated: {
+                const settingUpdatedPayload = payload as SettingUpdatedPayload;
+                switch (settingUpdatedPayload.settingName) {
+                    case "MessageComposerInput.showStickersButton": {
+                        const showStickersButton = SettingsStore.getValue("MessageComposerInput.showStickersButton");
+                        if (this.state.showStickersButton !== showStickersButton) {
+                            this.setState({ showStickersButton });
+                        }
+                        break;
+                    }
+
+                    case "feature_polls": {
+                        const showPollsButton = SettingsStore.getValue("feature_polls");
+                        if (this.state.showPollsButton !== showPollsButton) {
+                            this.setState({ showPollsButton });
+                        }
+                        break;
+                    }
+                }
+            }
         }
     };
 
@@ -331,9 +406,9 @@ export default class MessageComposer extends React.Component<IProps, IState> {
             if (createEvent && createEvent.getId()) createEventId = createEvent.getId();
         }
 
-        const viaServers = [this.state.tombstone.getSender().split(':').splice(1).join(':')];
+        const viaServers = [this.state.tombstone.getSender().split(':').slice(1).join(':')];
         dis.dispatch({
-            action: 'view_room',
+            action: Action.ViewRoom,
             highlighted: true,
             event_id: createEventId,
             room_id: replacementRoomId,
@@ -352,9 +427,10 @@ export default class MessageComposer extends React.Component<IProps, IState> {
 
     private renderPlaceholderText = () => {
         if (this.props.replyToEvent) {
-            if (this.props.replyInThread && this.props.e2eStatus) {
+            const replyingToThread = this.props.relation?.rel_type === RelationType.Thread;
+            if (replyingToThread && this.props.e2eStatus) {
                 return _t('Reply to encrypted thread…');
-            } else if (this.props.replyInThread) {
+            } else if (replyingToThread) {
                 return _t('Reply to thread…');
             } else if (this.props.e2eStatus) {
                 return _t('Send an encrypted reply…');
@@ -370,13 +446,33 @@ export default class MessageComposer extends React.Component<IProps, IState> {
         }
     };
 
-    private addEmoji(emoji: string): boolean {
+    private addEmoji = (emoji: string): boolean => {
         dis.dispatch<ComposerInsertPayload>({
             action: Action.ComposerInsert,
             text: emoji,
+            timelineRenderingType: this.context.timelineRenderingType,
         });
         return true;
-    }
+    };
+
+    private shareLocation = (
+        uri: string,
+        ts: number,
+        _type: LocationShareType,
+        description: string | null,
+    ): boolean => {
+        if (!uri) return false;
+        try {
+            const text = textForLocation(uri, ts, description);
+            MatrixClientPeg.get().sendMessage(
+                this.props.room.roomId,
+                makeLocationContent(text, uri, ts, description),
+            );
+        } catch (e) {
+            logger.error("Error sending location:", e);
+        }
+        return true;
+    };
 
     private addGif = async (gif: Gif) => {
         const cli = MatrixClientPeg.get();
@@ -393,14 +489,14 @@ export default class MessageComposer extends React.Component<IProps, IState> {
     };
 
     private sendMessage = async () => {
-        if (this.state.haveRecording && this.voiceRecordingButton) {
+        if (this.state.haveRecording && this.voiceRecordingButton.current) {
             // There shouldn't be any text message to send when a voice recording is active, so
             // just send out the voice recording.
-            await this.voiceRecordingButton.send();
+            await this.voiceRecordingButton.current?.send();
             return;
         }
 
-        this.messageComposerInput.sendMessage();
+        this.messageComposerInput.current?.sendMessage();
     };
 
     private onChange = (model: EditorModel) => {
@@ -429,9 +525,7 @@ export default class MessageComposer extends React.Component<IProps, IState> {
     };
 
     private shouldShowStickerPicker = (): boolean => {
-        return SettingsStore.getValue(UIFeature.Widgets)
-        && SettingsStore.getValue("MessageComposerInput.showStickersButton")
-        && !this.state.haveRecording;
+        return this.state.showStickersButton && !this.state.haveRecording;
     };
 
     private shouldShowGifPicker = (): boolean => {
@@ -451,11 +545,29 @@ export default class MessageComposer extends React.Component<IProps, IState> {
     };
 
     private renderButtons(menuPosition): JSX.Element | JSX.Element[] {
+        let uploadButtonIndex = 0;
         const buttons: JSX.Element[] = [];
         if (!this.state.haveRecording) {
+            if (this.state.showPollsButton) {
+                buttons.push(
+                    <PollButton key="polls" room={this.props.room} narrowMode={this.state.narrowMode} />,
+                );
+            }
+            uploadButtonIndex = buttons.length;
             buttons.push(
-                <UploadButton key="controls_upload" roomId={this.props.room.roomId} />,
+                <UploadButton key="controls_upload" roomId={this.props.room.roomId} relation={this.props.relation} />,
             );
+            if (SettingsStore.getValue("feature_location_share")) {
+                buttons.push(
+                    <LocationButton
+                        key="location"
+                        room={this.props.room}
+                        shareLocation={this.shareLocation}
+                        menuPosition={menuPosition}
+                        narrowMode={this.state.narrowMode}
+                    />,
+                );
+            }
             buttons.push(
                 <EmojiButton key="emoji_button" addEmoji={this.addEmoji} menuPosition={menuPosition} narrowMode={this.state.narrowMode} />,
             );
@@ -473,70 +585,76 @@ export default class MessageComposer extends React.Component<IProps, IState> {
                     className="mx_MessageComposer_button mx_MessageComposer_stickers"
                     onClick={() => this.showStickers(!this.state.showStickers)}
                     title={title}
-                    label={this.state.narrowMode && _t("Send a sticker")}
+                    label={this.state.narrowMode ? _t("Send a sticker") : null}
                 />,
             );
         }
+
         if (this.shouldShowGifPicker()) {
             buttons.push(<GifButton key="gif_button" addGif={this.addGif} />);
         }
+
+        // XXX: the recording UI does not work well in narrow mode, so we hide this button for now
         if (!this.state.haveRecording && !this.state.narrowMode) {
             buttons.push(
-                <AccessibleTooltipButton
+                <CollapsibleButton
+                    key="voice_message_send"
                     className="mx_MessageComposer_button mx_MessageComposer_voiceMessage"
-                    onClick={() => this.voiceRecordingButton?.onRecordStartEndClick()}
+                    onClick={() => this.voiceRecordingButton.current?.onRecordStartEndClick()}
                     title={_t("Send voice message")}
+                    narrowMode={this.state.narrowMode}
                 />,
             );
         }
 
         if (!this.state.narrowMode) {
             return buttons;
-        } else {
-            const classnames = classNames({
-                mx_MessageComposer_button: true,
-                mx_MessageComposer_buttonMenu: true,
-                mx_MessageComposer_closeButtonMenu: this.state.isMenuOpen,
-            });
-
-            return <>
-                { buttons[0] }
-                <AccessibleTooltipButton
-                    className={classnames}
-                    onClick={this.toggleButtonMenu}
-                    title={_t("More options")}
-                    tooltip={false}
-                />
-                { this.state.isMenuOpen && (
-                    <ContextMenu
-                        onFinished={this.toggleButtonMenu}
-                        {...menuPosition}
-                        menuPaddingRight={10}
-                        menuPaddingTop={5}
-                        menuPaddingBottom={5}
-                        menuWidth={150}
-                        wrapperClassName="mx_MessageComposer_Menu"
-                    >
-                        { buttons.slice(1).map((button, index) => (
-                            <MenuItem className="mx_CallContextMenu_item" key={index} onClick={this.toggleButtonMenu}>
-                                { button }
-                            </MenuItem>
-                        )) }
-                    </ContextMenu>
-                ) }
-            </>;
         }
+
+        const classnames = classNames({
+            mx_MessageComposer_button: true,
+            mx_MessageComposer_buttonMenu: true,
+            mx_MessageComposer_closeButtonMenu: this.state.isMenuOpen,
+        });
+
+        // we render the uploadButton at top level as it is a very common interaction, splice it out of the rest
+        const [uploadButton] = buttons.splice(uploadButtonIndex, 1);
+        return <>
+            { uploadButton }
+            <AccessibleTooltipButton
+                className={classnames}
+                onClick={this.toggleButtonMenu}
+                title={_t("More options")}
+                tooltip={false}
+            />
+            { this.state.isMenuOpen && (
+                <ContextMenu
+                    onFinished={this.toggleButtonMenu}
+                    {...menuPosition}
+                    menuPaddingRight={10}
+                    menuPaddingTop={5}
+                    menuPaddingBottom={5}
+                    menuWidth={150}
+                    wrapperClassName="mx_MessageComposer_Menu"
+                >
+                    { buttons.map((button, index) => (
+                        <MenuItem className="mx_CallContextMenu_item" key={index} onClick={this.toggleButtonMenu}>
+                            { button }
+                        </MenuItem>
+                    )) }
+                </ContextMenu>
+            ) }
+        </>;
     }
 
     render() {
         const controls = [
-            this.state.me && !this.props.compact ? <ComposerAvatar key="controls_avatar" me={this.state.me} /> : null,
             this.props.e2eStatus ?
                 <E2EIcon key="e2eIcon" status={this.props.e2eStatus} className="mx_MessageComposer_e2eIcon" /> :
                 null,
         ];
 
-        let menuPosition;
+        let menuPosition: AboveLeftOf | undefined;
         if (this.ref.current) {
             const contentRect = this.ref.current.getBoundingClientRect();
             menuPosition = aboveLeftOf(contentRect);
@@ -545,12 +663,12 @@ export default class MessageComposer extends React.Component<IProps, IState> {
         if (!this.state.tombstone && this.state.canSendMessages) {
             controls.push(
                 <SendMessageComposer
-                    ref={(c) => this.messageComposerInput = c}
+                    ref={this.messageComposerInput}
                     key="controls_input"
                     room={this.props.room}
                     placeholder={this.renderPlaceholderText()}
                     permalinkCreator={this.props.permalinkCreator}
-                    replyInThread={this.props.replyInThread}
+                    relation={this.props.relation}
                     replyToEvent={this.props.replyToEvent}
                     onChange={this.onChange}
                     disabled={this.state.haveRecording}
@@ -559,7 +677,7 @@ export default class MessageComposer extends React.Component<IProps, IState> {
 
             controls.push(<VoiceRecordComposerTile
                 key="controls_voice_record"
-                ref={c => this.voiceRecordingButton = c}
+                ref={this.voiceRecordingButton}
                 room={this.props.room} />);
         } else if (this.state.tombstone) {
             const replacementRoomId = this.state.tombstone.getContent()['replacement_room'];
@@ -601,12 +719,20 @@ export default class MessageComposer extends React.Component<IProps, IState> {
                 yOffset={-50}
             />;
         }
+
+        const threadId = this.props.relation?.rel_type === RelationType.Thread
+            ? this.props.relation.event_id
+            : null;
+
         controls.push(
             <Stickerpicker
                 room={this.props.room}
+                threadId={threadId}
                 showStickers={this.state.showStickers}
                 setShowStickers={this.showStickers}
-                menuPosition={menuPosition} />,
+                menuPosition={menuPosition}
+                key="stickers"
+            />,
         );
 
         const showSendButton = !this.state.isComposerEmpty || this.state.haveRecording;
@@ -615,15 +741,16 @@ export default class MessageComposer extends React.Component<IProps, IState> {
             "mx_MessageComposer": true,
             "mx_GroupLayout": true,
             "mx_MessageComposer--compact": this.props.compact,
+            "mx_MessageComposer_e2eStatus": this.props.e2eStatus != undefined,
         });
 
         return (
             <div className={classes} ref={this.ref}>
                 { recordingTooltip }
                 <div className="mx_MessageComposer_wrapper">
-                    { this.props.showReplyPreview && (
-                        <ReplyPreview permalinkCreator={this.props.permalinkCreator} />
-                    ) }
+                    <ReplyPreview
+                        replyToEvent={this.props.replyToEvent}
+                        permalinkCreator={this.props.permalinkCreator} />
                     <div className="mx_MessageComposer_row">
                         { controls }
                         { this.renderButtons(menuPosition) }

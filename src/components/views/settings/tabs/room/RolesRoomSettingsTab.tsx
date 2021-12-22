@@ -15,22 +15,27 @@ limitations under the License.
 */
 
 import React from 'react';
+import { EventType } from "matrix-js-sdk/src/@types/event";
+import { RoomMember } from "matrix-js-sdk/src/models/room-member";
+import { MatrixEvent } from "matrix-js-sdk/src/models/event";
+import { RoomState } from "matrix-js-sdk/src/models/room-state";
+import { logger } from "matrix-js-sdk/src/logger";
+
 import { _t, _td } from "../../../../../languageHandler";
 import { MatrixClientPeg } from "../../../../../MatrixClientPeg";
 import AccessibleButton from "../../../elements/AccessibleButton";
 import Modal from "../../../../../Modal";
 import { replaceableComponent } from "../../../../../utils/replaceableComponent";
-import { EventType } from "matrix-js-sdk/src/@types/event";
-import { RoomMember } from "matrix-js-sdk/src/models/room-member";
-import { MatrixEvent } from "matrix-js-sdk/src/models/event";
-import { RoomState } from "matrix-js-sdk/src/models/room-state";
 import { compare } from "../../../../../utils/strings";
 import ErrorDialog from '../../../dialogs/ErrorDialog';
 import PowerSelector from "../../../elements/PowerSelector";
+import SettingsFieldset from '../../SettingsFieldset';
+import SettingsStore from "../../../../../settings/SettingsStore";
 
 interface IEventShowOpts {
     isState?: boolean;
     hideForSpace?: boolean;
+    hideForRoom?: boolean;
 }
 
 interface IPowerLevelDescriptor {
@@ -44,12 +49,14 @@ const plEventsToShow: Record<string, IEventShowOpts> = {
     [EventType.RoomAvatar]: { isState: true },
     [EventType.RoomName]: { isState: true },
     [EventType.RoomCanonicalAlias]: { isState: true },
+    [EventType.SpaceChild]: { isState: true, hideForRoom: true },
     [EventType.RoomHistoryVisibility]: { isState: true, hideForSpace: true },
     [EventType.RoomPowerLevels]: { isState: true },
     [EventType.RoomTopic]: { isState: true },
     [EventType.RoomTombstone]: { isState: true, hideForSpace: true },
     [EventType.RoomEncryption]: { isState: true, hideForSpace: true },
     [EventType.RoomServerAcl]: { isState: true, hideForSpace: true },
+    [EventType.RoomPinnedEvents]: { isState: true, hideForSpace: true },
 
     // TODO: Enable support for m.widget event type (https://github.com/vector-im/element-web/issues/13111)
     "im.vector.modular.widgets": { isState: true, hideForSpace: true },
@@ -72,7 +79,7 @@ interface IBannedUserProps {
 export class BannedUser extends React.Component<IBannedUserProps> {
     private onUnbanClick = (e) => {
         MatrixClientPeg.get().unban(this.props.member.roomId, this.props.member.userId).catch((err) => {
-            console.error("Failed to unban: " + err);
+            logger.error("Failed to unban: " + err);
             Modal.createTrackedDialog('Failed to unban', '', ErrorDialog, {
                 title: _t('Error'),
                 description: _t('Failed to unban'),
@@ -137,7 +144,7 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
         }
     }
 
-    private onPowerLevelsChanged = (inputValue: string, powerLevelKey: string) => {
+    private onPowerLevelsChanged = (value: number, powerLevelKey: string) => {
         const client = MatrixClientPeg.get();
         const room = client.getRoom(this.props.roomId);
         const plEvent = room.currentState.getStateEvents(EventType.RoomPowerLevels, '');
@@ -147,8 +154,6 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
         plContent = Object.assign({}, plContent);
 
         const eventsLevelPrefix = "event_levels_";
-
-        const value = parseInt(inputValue);
 
         if (powerLevelKey.startsWith(eventsLevelPrefix)) {
             // deep copy "events" object, Object.assign itself won't deep copy
@@ -169,7 +174,7 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
         }
 
         client.sendStateEvent(this.props.roomId, EventType.RoomPowerLevels, plContent).catch(e => {
-            console.error(e);
+            logger.error(e);
 
             Modal.createTrackedDialog('Power level requirement change failed', '', ErrorDialog, {
                 title: _t('Error changing power level requirement'),
@@ -181,7 +186,7 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
         });
     };
 
-    private onUserPowerLevelChanged = (value: string, powerLevelKey: string) => {
+    private onUserPowerLevelChanged = (value: number, powerLevelKey: string) => {
         const client = MatrixClientPeg.get();
         const room = client.getRoom(this.props.roomId);
         const plEvent = room.currentState.getStateEvents(EventType.RoomPowerLevels, '');
@@ -195,7 +200,7 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
         plContent['users'][powerLevelKey] = value;
 
         client.sendStateEvent(this.props.roomId, EventType.RoomPowerLevels, plContent).catch(e => {
-            console.error(e);
+            logger.error(e);
 
             Modal.createTrackedDialog('Power level change failed', '', ErrorDialog, {
                 title: _t('Error changing power level'),
@@ -223,6 +228,7 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
             [EventType.RoomCanonicalAlias]: isSpaceRoom
                 ? _td("Change main address for the space")
                 : _td("Change main address for the room"),
+            [EventType.SpaceChild]: _td("Manage rooms in this space"),
             [EventType.RoomHistoryVisibility]: _td("Change history visibility"),
             [EventType.RoomPowerLevels]: _td("Change permissions"),
             [EventType.RoomTopic]: isSpaceRoom ? _td("Change description") : _td("Change topic"),
@@ -233,6 +239,10 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
             // TODO: Enable support for m.widget event type (https://github.com/vector-im/element-web/issues/13111)
             "im.vector.modular.widgets": isSpaceRoom ? null : _td("Modify widgets"),
         };
+
+        if (SettingsStore.getValue("feature_pinning")) {
+            plEventsToLabels[EventType.RoomPinnedEvents] = _td("Manage pinned events");
+        }
 
         const powerLevelDescriptors: Record<string, IPowerLevelDescriptor> = {
             "users_default": {
@@ -336,17 +346,15 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
 
             if (privilegedUsers.length) {
                 privilegedUsersSection =
-                    <div className='mx_SettingsTab_section mx_SettingsTab_subsectionText'>
-                        <div className='mx_SettingsTab_subheading'>{ _t('Privileged Users') }</div>
-                        { privilegedUsers }
-                    </div>;
+                <SettingsFieldset legend={_t('Privileged Users')}>
+                    { privilegedUsers }
+                </SettingsFieldset>;
             }
             if (mutedUsers.length) {
                 mutedUsersSection =
-                    <div className='mx_SettingsTab_section mx_SettingsTab_subsectionText'>
-                        <div className='mx_SettingsTab_subheading'>{ _t('Muted Users') }</div>
+                    <SettingsFieldset legend={_t('Muted Users')}>
                         { mutedUsers }
-                    </div>;
+                    </SettingsFieldset>;
             }
         }
 
@@ -355,8 +363,7 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
         if (banned.length) {
             const canBanUsers = currentUserLevel >= banLevel;
             bannedUsersSection =
-                <div className='mx_SettingsTab_section mx_SettingsTab_subsectionText'>
-                    <div className='mx_SettingsTab_subheading'>{ _t('Banned users') }</div>
+                <SettingsFieldset legend={_t('Banned users')}>
                     <ul>
                         { banned.map((member) => {
                             const banEvent = member.events.member.getContent();
@@ -374,7 +381,7 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
                             );
                         }) }
                     </ul>
-                </div>;
+                </SettingsFieldset>;
         }
 
         const powerSelectors = Object.keys(powerLevelDescriptors).map((key, index) => {
@@ -411,7 +418,9 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
         }
 
         const eventPowerSelectors = Object.keys(eventsLevels).map((eventType, i) => {
-            if (isSpaceRoom && plEventsToShow[eventType].hideForSpace) {
+            if (isSpaceRoom && plEventsToShow[eventType]?.hideForSpace) {
+                return null;
+            } else if (!isSpaceRoom && plEventsToShow[eventType]?.hideForRoom) {
                 return null;
             }
 
@@ -441,15 +450,17 @@ export default class RolesRoomSettingsTab extends React.Component<IProps> {
                 { privilegedUsersSection }
                 { mutedUsersSection }
                 { bannedUsersSection }
-                <div className='mx_SettingsTab_section mx_SettingsTab_subsectionText'>
-                    <span className='mx_SettingsTab_subheading'>{ _t("Permissions") }</span>
-                    <p>{ isSpaceRoom
-                        ? _t('Select the roles required to change various parts of the space')
-                        : _t('Select the roles required to change various parts of the room')
-                    }</p>
+                <SettingsFieldset
+                    legend={_t("Permissions")}
+                    description={
+                        isSpaceRoom
+                            ? _t('Select the roles required to change various parts of the space')
+                            : _t('Select the roles required to change various parts of the room')
+                    }
+                >
                     { powerSelectors }
                     { eventPowerSelectors }
-                </div>
+                </SettingsFieldset>
             </div>
         );
     }

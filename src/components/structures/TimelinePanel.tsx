@@ -22,16 +22,19 @@ import { EventTimelineSet } from "matrix-js-sdk/src/models/event-timeline-set";
 import { Direction, EventTimeline } from "matrix-js-sdk/src/models/event-timeline";
 import { TimelineWindow } from "matrix-js-sdk/src/timeline-window";
 import { EventType, RelationType } from 'matrix-js-sdk/src/@types/event';
-import { SyncState } from 'matrix-js-sdk/src/sync.api';
+import { SyncState } from 'matrix-js-sdk/src/sync';
+import { debounce } from 'lodash';
+import { logger } from "matrix-js-sdk/src/logger";
 
 import SettingsStore from "../../settings/SettingsStore";
-import { Layout } from "../../settings/Layout";
+import { Layout } from "../../settings/enums/Layout";
 import { _t } from '../../languageHandler';
 import { MatrixClientPeg } from "../../MatrixClientPeg";
-import RoomContext from "../../contexts/RoomContext";
+import RoomContext, { TimelineRenderingType } from "../../contexts/RoomContext";
 import UserActivity from "../../UserActivity";
 import Modal from "../../Modal";
 import dis from "../../dispatcher/dispatcher";
+import { Action } from '../../dispatcher/actions';
 import { Key } from '../../Keyboard';
 import Timer from '../../utils/Timer';
 import shouldHideEvent from '../../shouldHideEvent';
@@ -47,7 +50,6 @@ import { RoomPermalinkCreator } from "../../utils/permalinks/Permalinks";
 import Spinner from "../views/elements/Spinner";
 import EditorStateTransfer from '../../utils/EditorStateTransfer';
 import ErrorDialog from '../views/dialogs/ErrorDialog';
-import { debounce } from 'lodash';
 
 const PAGINATE_SIZE = 20;
 const INITIAL_SIZE = 20;
@@ -60,7 +62,7 @@ const DEBUG = false;
 let debuglog = function(...s: any[]) {};
 if (DEBUG) {
     // using bind means that we get to keep useful line numbers in the console
-    debuglog = console.log.bind(console);
+    debuglog = logger.log.bind(console);
 }
 
 interface IProps {
@@ -131,6 +133,7 @@ interface IProps {
     onPaginationRequest?(timelineWindow: TimelineWindow, direction: string, size: number): Promise<boolean>;
 
     hideThreadedMessages?: boolean;
+    disableGrouping?: boolean;
 }
 
 interface IState {
@@ -220,6 +223,7 @@ class TimelinePanel extends React.Component<IProps, IState> {
         className: 'mx_RoomView_messagePanel',
         sendReadReceiptOnLoad: true,
         hideThreadedMessages: true,
+        disableGrouping: false,
     };
 
     private lastRRSentEventId: string = undefined;
@@ -310,13 +314,13 @@ class TimelinePanel extends React.Component<IProps, IState> {
             //
             // for now, just warn about this. But we're going to end up paginating
             // both rooms separately, and it's all bad.
-            console.warn("Replacing timelineSet on a TimelinePanel - confusion may ensue");
+            logger.warn("Replacing timelineSet on a TimelinePanel - confusion may ensue");
         }
 
         const differentEventId = newProps.eventId != this.props.eventId;
         const differentHighlightedEventId = newProps.highlightedEventId != this.props.highlightedEventId;
         if (differentEventId || differentHighlightedEventId) {
-            console.log("TimelinePanel switching to eventId " + newProps.eventId +
+            logger.log("TimelinePanel switching to eventId " + newProps.eventId +
                         " (was " + this.props.eventId + ")");
             return this.initTimeline(newProps);
         }
@@ -473,10 +477,7 @@ class TimelinePanel extends React.Component<IProps, IState> {
     };
 
     private onMessageListScroll = e => {
-        if (this.props.onScroll) {
-            this.props.onScroll(e);
-        }
-
+        this.props.onScroll?.(e);
         if (this.props.manageReadMarkers) {
             this.doManageReadMarkers();
         }
@@ -504,7 +505,7 @@ class TimelinePanel extends React.Component<IProps, IState> {
         // (and user is active), switch timeout
         const timeout = this.readMarkerTimeout(rmPosition);
         // NO-OP when timeout already has set to the given value
-        this.readMarkerActivityTimer.changeTimeout(timeout);
+        this.readMarkerActivityTimer?.changeTimeout(timeout);
     }, READ_MARKER_DEBOUNCE_MS, { leading: false, trailing: true });
 
     private onAction = (payload: ActionPayload): void => {
@@ -591,7 +592,7 @@ class TimelinePanel extends React.Component<IProps, IState> {
             this.setState<null>(updatedState, () => {
                 this.messagePanel.current.updateTimelineMinHeight();
                 if (callRMUpdated) {
-                    this.props.onReadMarkerUpdated();
+                    this.props.onReadMarkerUpdated?.();
                 }
             });
         });
@@ -797,11 +798,11 @@ class TimelinePanel extends React.Component<IProps, IState> {
                         lastReadEvent,
                         {},
                     ).catch((e) => {
-                        console.error(e);
+                        logger.error(e);
                         this.lastRRSentEventId = undefined;
                     });
                 } else {
-                    console.error(e);
+                    logger.error(e);
                 }
                 // it failed, so allow retries next time the user is active
                 this.lastRRSentEventId = undefined;
@@ -1098,7 +1099,7 @@ class TimelinePanel extends React.Component<IProps, IState> {
                     // we're in a setState callback, and we know
                     // timelineLoading is now false, so render() should have
                     // mounted the message panel.
-                    console.log("can't initialise scroll state because " +
+                    logger.log("can't initialise scroll state because " +
                                 "messagePanel didn't load");
                     return;
                 }
@@ -1119,7 +1120,7 @@ class TimelinePanel extends React.Component<IProps, IState> {
             if (this.unmounted) return;
 
             this.setState({ timelineLoading: false });
-            console.error(
+            logger.error(
                 `Error loading timeline panel at ${eventId}: ${error}`,
             );
 
@@ -1133,7 +1134,7 @@ class TimelinePanel extends React.Component<IProps, IState> {
                 onFinished = () => {
                     // go via the dispatcher so that the URL is updated
                     dis.dispatch({
-                        action: 'view_room',
+                        action: Action.ViewRoom,
                         room_id: this.props.timelineSet.room.roomId,
                     });
                 };
@@ -1221,9 +1222,11 @@ class TimelinePanel extends React.Component<IProps, IState> {
         // should use this list, so that they don't advance into pending events.
         const liveEvents = [...events];
 
+        const thread = events[0]?.getThread();
+
         // if we're at the end of the live timeline, append the pending events
         if (!this.timelineWindow.canPaginate(EventTimeline.FORWARDS)) {
-            events.push(...this.props.timelineSet.getPendingEvents());
+            events.push(...this.props.timelineSet.getPendingEvents(thread));
         }
 
         return {
@@ -1264,7 +1267,7 @@ class TimelinePanel extends React.Component<IProps, IState> {
                 // Somehow, it seems to be possible for live events to not have
                 // a timeline, even though that should not happen. :(
                 // https://github.com/vector-im/element-web/issues/12120
-                console.warn(
+                logger.warn(
                     `Event ${events[i].getId()} in room ${room.roomId} is live, ` +
                     `but it does not have a timeline`,
                 );
@@ -1308,12 +1311,17 @@ class TimelinePanel extends React.Component<IProps, IState> {
     }
 
     private indexForEventId(evId: string): number | null {
-        for (let i = 0; i < this.state.events.length; ++i) {
-            if (evId == this.state.events[i].getId()) {
-                return i;
-            }
+        /* Threads do not have server side support for read receipts and the concept
+        is very tied to the main room timeline, we are forcing the timeline to
+        send read receipts for threaded events */
+        const isThreadTimeline = this.context.timelineRenderingType === TimelineRenderingType.Thread;
+        if (SettingsStore.getValue("feature_thread") && isThreadTimeline) {
+            return 0;
         }
-        return null;
+        const index = this.state.events.findIndex(ev => ev.getId() === evId);
+        return index > -1
+            ? index
+            : null;
     }
 
     private getLastDisplayedEventIndex(opts: IEventIndexOpts = {}): number | null {
@@ -1537,6 +1545,7 @@ class TimelinePanel extends React.Component<IProps, IState> {
                 layout={this.props.layout}
                 enableFlair={SettingsStore.getValue(UIFeature.Flair)}
                 hideThreadedMessages={this.props.hideThreadedMessages}
+                disableGrouping={this.props.disableGrouping}
             />
         );
     }

@@ -15,6 +15,8 @@ limitations under the License.
 */
 
 import React, { createRef } from 'react';
+import { logger } from "matrix-js-sdk/src/logger";
+
 import { _t } from "../../../languageHandler";
 import { MatrixClientPeg } from "../../../MatrixClientPeg";
 import Field from "../elements/Field";
@@ -26,6 +28,7 @@ import { replaceableComponent } from "../../../utils/replaceableComponent";
 import { mediaFromMxc } from "../../../customisations/Media";
 import AccessibleButton from '../elements/AccessibleButton';
 import AvatarSetting from './AvatarSetting';
+import ExternalLink from '../elements/ExternalLink';
 
 interface IState {
     userId?: string;
@@ -104,7 +107,7 @@ export default class ProfileSettings extends React.Component<{}, IState> {
             }
 
             if (this.state.avatarFile) {
-                console.log(
+                logger.log(
                     `Uploading new avatar, ${this.state.avatarFile.name} of type ${this.state.avatarFile.type},` +
                     ` (${this.state.avatarFile.size}) bytes`);
                 const uri = await client.uploadContent(this.state.avatarFile);
@@ -116,7 +119,7 @@ export default class ProfileSettings extends React.Component<{}, IState> {
                 await client.setAvatarUrl(""); // use empty string as Synapse 500s on undefined
             }
         } catch (err) {
-            console.log("Failed to save profile", err);
+            logger.log("Failed to save profile", err);
             Modal.createTrackedDialog('Failed to save profile', '', ErrorDialog, {
                 title: _t("Failed to save your profile"),
                 description: ((err && err.message) ? err.message : _t("The operation could not be completed")),
@@ -163,12 +166,11 @@ export default class ProfileSettings extends React.Component<{}, IState> {
                 { _t(
                     "<a>Upgrade</a> to your own domain", {},
                     {
-                        a: sub => <a href={hostingSignupLink} target="_blank" rel="noreferrer noopener">{ sub }</a>,
+                        a: sub => <ExternalLink href={hostingSignupLink} target="_blank" rel="noreferrer noopener">
+                            { sub }
+                        </ExternalLink>,
                     },
                 ) }
-                <a href={hostingSignupLink} target="_blank" rel="noreferrer noopener">
-                    <img src={require("../../../../res/img/external-link.svg")} width="11" height="10" alt='' />
-                </a>
             </span>;
         }
 
