@@ -1,7 +1,7 @@
 import classNames from 'classnames';
 import React from 'react';
 import { _t } from '../../../languageHandler';
-import { aboveLeftOf, ContextMenu, ContextMenuTooltipButton, useContextMenu } from '../../structures/ContextMenu';
+import ContextMenu, { aboveLeftOf, ContextMenuTooltipButton, useContextMenu } from '../../structures/ContextMenu';
 import { Gif } from '../gifpicker/Gif';
 import GifPicker from '../gifpicker/GifPicker';
 

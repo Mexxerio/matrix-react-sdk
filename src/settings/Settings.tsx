@@ -305,7 +305,7 @@ export const SETTINGS: {[setting: string]: ISetting} = {
         labsGroup: LabGroup.Messaging,
         supportedLevels: LEVELS_FEATURE,
         displayName: _td("Polls (under active development)"),
-        default: false,
+        default: true,
     },
     "feature_location_share": {
         isFeature: true,
@@ -412,7 +412,7 @@ export const SETTINGS: {[setting: string]: ISetting} = {
         isFeature: true,
         supportedLevels: LEVELS_FEATURE,
         displayName: _td('Show GIF picker button'),
-        default: false,
+        default: true,
     },
     // TODO: Wire up appropriately to UI (FTUE notifications)
     "Notifications.alwaysShowBadgeCounts": {

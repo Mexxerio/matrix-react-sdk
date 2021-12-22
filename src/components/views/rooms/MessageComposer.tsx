@@ -259,6 +259,7 @@ interface IState {
     showStickers: boolean;
     showStickersButton: boolean;
     showPollsButton: boolean;
+    showGifButton: boolean;
 }
 
 @replaceableComponent("views.rooms.MessageComposer")
@@ -290,6 +291,7 @@ export default class MessageComposer extends React.Component<IProps, IState> {
             showStickers: false,
             showStickersButton: SettingsStore.getValue("MessageComposerInput.showStickersButton"),
             showPollsButton: SettingsStore.getValue("feature_polls"),
+            showGifButton: SettingsStore.getValue("feature_giphy_integration"),
         };
 
         this.instanceId = instanceCount++;
@@ -346,6 +348,14 @@ export default class MessageComposer extends React.Component<IProps, IState> {
                         const showPollsButton = SettingsStore.getValue("feature_polls");
                         if (this.state.showPollsButton !== showPollsButton) {
                             this.setState({ showPollsButton });
+                        }
+                        break;
+                    }
+
+                    case "feature_giphy_integration": {
+                        const showGifButton = SettingsStore.getValue("feature_giphy_integration");
+                        if (this.state.showGifButton !== showGifButton) {
+                            this.setState({ showGifButton });
                         }
                         break;
                     }
@@ -480,12 +490,17 @@ export default class MessageComposer extends React.Component<IProps, IState> {
         const blob: any = await response.blob();
         blob.name = gif.title;
 
+        // ContentMessages.sharedInstance().sendContentListToRoom(
+        //     [blob as File],
+        //     this.props.room.roomId,
+        //     cli,
+        //     false,
+        // );
+
         ContentMessages.sharedInstance().sendContentListToRoom(
-            [blob as File],
-            this.props.room.roomId,
-            cli,
-            false,
+            [blob as File], this.props.room.roomId, this.props.relation, MatrixClientPeg.get(), false,
         );
+
     };
 
     private sendMessage = async () => {
@@ -529,9 +544,10 @@ export default class MessageComposer extends React.Component<IProps, IState> {
     };
 
     private shouldShowGifPicker = (): boolean => {
-        return SettingsStore.getValue(UIFeature.Widgets)
-        && SettingsStore.getValue("feature_giphy_integration")
-        && !this.state.haveRecording;
+        return this.state.showGifButton && !this.state.haveRecording;
+        // return SettingsStore.getValue(UIFeature.Widgets)
+        // && SettingsStore.getValue("feature_giphy_integration")
+        // && !this.state.haveRecording;
     };
 
     private showStickers = (showStickers: boolean) => {
